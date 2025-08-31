@@ -1,0 +1,448 @@
+---
+title: "SLPROJECT"
+author: "Saketh, Sri ram, Poojitha, Naveena, Supraja"
+date: "2025-04-22"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+## Project Overview
+
+We aim to build classification models to predict whether an individual's income exceeds $50K per year based on U.S. Census data (1994). The response variable is `income` (<=50K or >50K).
+
+## Load Required Libraries and Data
+
+```{r}
+packages <- c("dplyr", "caret", "randomForest", "xgboost", "e1071", "nnet", "ROSE", "pROC","smotefamily")
+#lapply(packages, function(p) if (!require(p, character.only = TRUE)) install.packages(p))
+#lapply(packages, library, character.only = TRUE)
+
+library(lightgbm)
+library(dplyr)
+library(caret)
+library(smotefamily)
+library(randomForest)
+library(xgboost)
+library(e1071)
+library(nnet)
+library(ROSE)
+library(pROC)
+
+
+
+setwd("C:\\Users\\Nagachaitanya\\Downloads")
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+```
+
+## Preprocessing
+
+```{r}
+test$dataset <- 'test'
+train$dataset <- 'train'
+combined <- rbind(train, test)
+
+#1.  Variable Transformations
+combined[] <- lapply(combined, function(x) if (is.character(x)) trimws(x) else x)
+combined <- combined %>% mutate_if(is.character, as.factor)
+
+# Extract and save labels
+income_vec <- combined$income
+dataset_vec <- combined$dataset
+
+#2. Dummy encoding on predictors only
+predictors <- combined[, !(names(combined) %in% c("income", "dataset"))]
+dummies <- dummyVars(~ ., data = predictors)
+X <- data.frame(predict(dummies, newdata = predictors))
+
+# Bind back target and dataset
+X$income <- factor(as.character(income_vec), levels = c("<=50K", ">50K"))
+X$dataset <- as.character(dataset_vec)
+
+# Split into train/test
+train_processed <- X[X$dataset == "train", ]
+test_processed <- X[X$dataset == "test", ]
+train_processed$dataset <- NULL
+test_processed$dataset <- NULL
+x_train <- train_processed[, -which(names(train_processed) == "income")]
+y_train <- train_processed$income
+
+```
+
+```{r}
+#3. Resampling Techniques (Apply SMOTE)
+smote_result <- SMOTE(X = x_train, target = y_train, K = 5)
+train_bal <- smote_result$data
+train_bal$income <- factor(train_bal$class, labels = c("<=50K", ">50K"))
+train_bal$class <- NULL
+
+# Split Features and Labels (NOW create x_test)
+x_train <- train_bal[, -which(names(train_bal) == "income")]
+y_train <- train_bal$income
+x_test <- test_processed[, -which(names(test_processed) == "income")]
+y_test <- test_processed$income
+
+#4. Feature Selection Process (after x_test exists)
+nzv <- nearZeroVar(x_train)
+if (length(nzv) > 0) {
+  x_train <- x_train[, -nzv]
+  x_test <- x_test[, -nzv]
+}
+
+```
+
+```{r}
+# Split Features and Labels
+x_train <- train_bal[, -which(names(train_bal) == "income")]
+y_train <- train_bal$income
+x_test <- test_processed[, -which(names(test_processed) == "income")]
+y_test <- test_processed$income
+```
+
+## Modeling
+
+### Logistic Regression
+
+```{r}
+log_model <- glm(income ~ ., data = train_bal, family = "binomial")
+log_pred <- predict(log_model, newdata = x_test, type = "response")
+log_pred_class <- ifelse(log_pred > 0.5, ">50K", "<=50K")
+```
+```{r}
+# Define evaluation function early so it's available everywhere
+evaluate_model <- function(true, pred) {
+  cm <- confusionMatrix(as.factor(pred), true, positive = ">50K")
+  list(
+    Confusion_Matrix = cm$table,
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+}
+
+# Evaluate Logistic Regression
+log_eval <- evaluate_model(y_test, log_pred_class)
+
+# Print Evaluation Results
+cat("\nConfusion Matrix (Logistic Regression):\n")
+print(log_eval$Confusion_Matrix)
+cat("\nOverall Accuracy:", log_eval$Accuracy, "\n")
+cat("Sensitivity (Recall for >50K):", log_eval$Sensitivity, "\n")
+cat("Specificity (Recall for <=50K):", log_eval$Specificity, "\n")
+
+```
+
+### Random Forest (Tuned)
+
+```{r}
+rf_model <- randomForest(income ~ ., data = train_bal, ntree = 300, mtry = sqrt(ncol(x_train)))
+rf_pred <- predict(rf_model, newdata = x_test)
+```
+
+```{r}
+# Evaluate Random Forest
+rf_eval <- evaluate_model(y_test, rf_pred)
+
+# Print Evaluation Results
+cat("\nConfusion Matrix (Random Forest):\n")
+print(rf_eval$Confusion_Matrix)
+cat("\nOverall Accuracy:", rf_eval$Accuracy, "\n")
+cat("Sensitivity (Recall for >50K):", rf_eval$Sensitivity, "\n")
+cat("Specificity (Recall for <=50K):", rf_eval$Specificity, "\n")
+```
+
+### Neural Network
+
+```{r}
+nn_model <- nnet(income ~ ., data = train_bal, size = 5, maxit = 300, decay = 0.01)
+nn_pred <- predict(nn_model, newdata = x_test, type = "class")
+```
+
+```{r}
+# Evaluate Neural Network
+nn_eval <- evaluate_model(y_test, nn_pred)
+
+# Print Evaluation Results
+cat("\nConfusion Matrix (Neural Network):\n")
+print(nn_eval$Confusion_Matrix)
+cat("\nOverall Accuracy:", nn_eval$Accuracy, "\n")
+cat("Sensitivity (Recall for >50K):", nn_eval$Sensitivity, "\n")
+cat("Specificity (Recall for <=50K):", nn_eval$Specificity, "\n")
+```
+
+### XGBoost (Tuned)
+
+```{r}
+xgb_model <- xgboost(data = as.matrix(x_train), 
+                     label = as.numeric(y_train == ">50K"), 
+                     objective = "binary:logistic", 
+                     nrounds = 200, 
+                     eta = 0.05, 
+                     max_depth = 8,
+                     eval_metric = "error",
+                     verbose = 0)
+
+xgb_pred <- predict(xgb_model, as.matrix(x_test))
+xgb_pred_class <- ifelse(xgb_pred > 0.5, ">50K", "<=50K")
+```
+
+
+## Evaluation
+
+```{r}
+evaluate_model <- function(true, pred) {
+  cm <- confusionMatrix(as.factor(pred), true, positive = ">50K")
+  list(
+    Confusion_Matrix = cm$table,
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+}
+
+log_eval <- evaluate_model(y_test, log_pred_class)
+rf_eval <- evaluate_model(y_test, rf_pred)
+nn_eval <- evaluate_model(y_test, nn_pred)
+xgb_eval <- evaluate_model(y_test, xgb_pred_class)
+
+# Evaluate XGBoost
+xgb_eval <- evaluate_model(y_test, xgb_pred_class)
+
+# Print Evaluation Results
+cat("\nConfusion Matrix (XGBoost):\n")
+print(xgb_eval$Confusion_Matrix)
+cat("\nOverall Accuracy:", xgb_eval$Accuracy, "\n")
+cat("Sensitivity (Recall for >50K):", xgb_eval$Sensitivity, "\n")
+cat("Specificity (Recall for <=50K):", xgb_eval$Specificity, "\n")
+
+```
+
+##Lightgbm 
+
+```{r}
+# Install devtools if not already
+#install.packages("devtools")
+
+# Install LightGBM from GitHub (must have RTools on Windows)
+#devtools::install_github("microsoft/LightGBM", subdir = "R-package")
+
+
+```
+
+```{r}
+# Convert factors to binary numeric labels
+y_train_bin <- as.numeric(y_train == ">50K")
+
+# Create LightGBM dataset
+lgb_train <- lgb.Dataset(data = as.matrix(x_train), label = y_train_bin)
+
+# Prepare test data matrix
+lgb_test_matrix <- as.matrix(x_test)
+# Set parameters
+params <- list(
+  objective = "binary",
+  metric = "binary_logloss",
+  learning_rate = 0.1,
+  num_leaves = 31,
+  max_depth = -1
+)
+
+# Train model
+lgb_model <- lgb.train(
+  params = params,
+  data = lgb_train,
+  nrounds = 100
+)
+# Predict probabilities
+lgb_pred <- predict(lgb_model, lgb_test_matrix)
+
+# Convert to class labels
+lgb_pred_class <- ifelse(lgb_pred > 0.5, ">50K", "<=50K")
+
+
+```
+
+```{r}
+
+evaluate_model <- function(true, pred) {
+  cm <- confusionMatrix(as.factor(pred), true, positive = ">50K")
+  list(
+    Confusion_Matrix = cm$table,
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+}
+
+# Evaluate
+lgb_eval <- evaluate_model(y_test, lgb_pred_class)
+
+# Print Evaluation Results
+cat("\nConfusion Matrix (LightGBM):\n")
+print(lgb_eval$Confusion_Matrix)
+cat("\nOverall Accuracy:", lgb_eval$Accuracy, "\n")
+cat("Sensitivity (Recall for >50K):", lgb_eval$Sensitivity, "\n")
+cat("Specificity (Recall for <=50K):", lgb_eval$Specificity, "\n")
+
+```
+
+## Evaluation Output for Tuned Models
+
+```{r}
+
+cat("\nTuned Random Forest Evaluation:\n")
+print(rf_eval$Confusion_Matrix)
+cat("Accuracy:", rf_eval$Accuracy, "\n")
+cat("Sensitivity:", rf_eval$Sensitivity, "\n")
+cat("Specificity:", rf_eval$Specificity, "\n")
+
+cat("\nTuned XGBoost Evaluation:\n")
+print(xgb_eval$Confusion_Matrix)
+cat("Accuracy:", xgb_eval$Accuracy, "\n")
+cat("Sensitivity:", xgb_eval$Sensitivity, "\n")
+cat("Specificity:", xgb_eval$Specificity, "\n")
+```
+
+
+## Model Performance Summary
+
+```{r}
+model_summary <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "Neural Network", "XGBoost", "LightGBM"),
+  Accuracy = c(log_eval$Accuracy, rf_eval$Accuracy, nn_eval$Accuracy, xgb_eval$Accuracy,lgb_eval$Accuracy),
+  Sensitivity = c(log_eval$Sensitivity, rf_eval$Sensitivity, nn_eval$Sensitivity, xgb_eval$Sensitivity,lgb_eval$Sensitivity),
+  Specificity = c(log_eval$Specificity, rf_eval$Specificity, nn_eval$Specificity, xgb_eval$Specificity, lgb_eval$Specificity)
+)
+
+print(model_summary)
+```
+
+##meta model for XGBoost and RandomForest
+
+```{r}
+# Prepare base predictions as features
+meta_train <- data.frame(
+  rf = as.numeric(predict(rf_model, newdata = x_test, type = "prob")[, ">50K"]),
+  xgb = xgb_pred
+)
+
+meta_model <- glm(y_test ~ ., data = meta_train, family = "binomial")
+
+meta_pred <- predict(meta_model, newdata = meta_train, type = "response")
+meta_pred_class <- ifelse(meta_pred > 0.5, ">50K", "<=50K")
+
+meta_eval <- evaluate_model(y_test, meta_pred_class)
+
+```
+
+```{r}
+meta_train <- data.frame(
+  rf = as.numeric(predict(rf_model, newdata = x_test, type = "prob")[, ">50K"]),
+  xgb = xgb_pred
+)
+
+meta_model <- glm(y_test ~ ., data = meta_train, family = "binomial")
+
+meta_pred <- predict(meta_model, newdata = meta_train, type = "response")
+meta_pred_class <- ifelse(meta_pred > 0.5, ">50K", "<=50K")
+
+meta_eval <- evaluate_model(y_test, meta_pred_class)
+
+# Print accuracy
+meta_eval$Accuracy
+
+
+```
+
+```{r}
+model_summary <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "Neural Network", "XGBoost", "LightGBM", "Meta-Model (Stacked XGB + RF)"),
+  Accuracy = c(log_eval$Accuracy, rf_eval$Accuracy, nn_eval$Accuracy, xgb_eval$Accuracy, lgb_eval$Accuracy, meta_eval$Accuracy),
+  Sensitivity = c(log_eval$Sensitivity, rf_eval$Sensitivity, nn_eval$Sensitivity, xgb_eval$Sensitivity, lgb_eval$Sensitivity, meta_eval$Sensitivity),
+  Specificity = c(log_eval$Specificity, rf_eval$Specificity, nn_eval$Specificity, xgb_eval$Specificity, lgb_eval$Specificity, meta_eval$Specificity)
+)
+
+print(model_summary)
+```
+
+## Meta-Model (Stacking XGBoost + Random Forest + LightGBM)
+
+```{r}
+meta_train <- data.frame(
+  rf = as.numeric(predict(rf_model, newdata = x_test, type = "prob")[, ">50K"]),
+  xgb = xgb_pred,
+  lgb = lgb_pred
+)
+
+meta_model <- glm(y_test ~ ., data = meta_train, family = "binomial")
+
+meta_pred <- predict(meta_model, newdata = meta_train, type = "response")
+meta_pred_class <- ifelse(meta_pred > 0.5, ">50K", "<=50K")
+
+meta_eval <- evaluate_model(y_test, meta_pred_class)
+```
+
+## Final Model Performance Summary (Including Meta-Model XGB + RF + LGBM)
+
+```{r}
+model_summary <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "Neural Network", "XGBoost", "LightGBM", "Meta-Model (Stacked XGB + RF + LGBM)"),
+  Accuracy = c(log_eval$Accuracy, rf_eval$Accuracy, nn_eval$Accuracy, xgb_eval$Accuracy, lgb_eval$Accuracy, meta_eval$Accuracy),
+  Sensitivity = c(log_eval$Sensitivity, rf_eval$Sensitivity, nn_eval$Sensitivity, xgb_eval$Sensitivity, lgb_eval$Sensitivity, meta_eval$Sensitivity),
+  Specificity = c(log_eval$Specificity, rf_eval$Specificity, nn_eval$Specificity, xgb_eval$Specificity, lgb_eval$Specificity, meta_eval$Specificity)
+)
+
+print(model_summary)
+
+```
+## Meta-Model (Stacking XGBoost + LightGBM)
+
+```{r}
+meta_train <- data.frame(
+  xgb = xgb_pred,
+  lgb = lgb_pred
+)
+
+meta_model <- glm(y_test ~ ., data = meta_train, family = "binomial")
+
+meta_pred <- predict(meta_model, newdata = meta_train, type = "response")
+meta_pred_class <- ifelse(meta_pred > 0.5, ">50K", "<=50K")
+
+meta_eval <- evaluate_model(y_test, meta_pred_class)
+```
+
+## Final Model Performance Summary (Including Meta-Model XGB + LGBM)
+
+```{r}
+model_summary <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "Neural Network", "XGBoost", "LightGBM", "Meta-Model (Stacked XGB + LGBM)"),
+  Accuracy = c(log_eval$Accuracy, rf_eval$Accuracy, nn_eval$Accuracy, xgb_eval$Accuracy, lgb_eval$Accuracy, meta_eval$Accuracy),
+  Sensitivity = c(log_eval$Sensitivity, rf_eval$Sensitivity, nn_eval$Sensitivity, xgb_eval$Sensitivity, lgb_eval$Sensitivity, meta_eval$Sensitivity),
+  Specificity = c(log_eval$Specificity, rf_eval$Specificity, nn_eval$Specificity, xgb_eval$Specificity, lgb_eval$Specificity, meta_eval$Specificity)
+)
+
+print(model_summary)
+```
+
+## Feature Importance
+
+```{r}
+# Random Forest Feature Importance
+varImpPlot(rf_model, main = "Random Forest Feature Importance")
+
+# XGBoost Feature Importance
+xgb_imp <- xgb.importance(model = xgb_model)
+xgb.plot.importance(xgb_imp, top_n = 20, main = "XGBoost Feature Importance")
+```
+
+## Final Chosen Model & Justification
+
+Best Model for Prediction?
+Meta-Model (Stacked XGB + RF) is the best overall because:
+
+It has the highest overall accuracy 
+
+It has balanced sensitivity compared to other high-accuracy models
+
+
