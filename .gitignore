@@ -1,0 +1,15 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Data (too large for git)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
